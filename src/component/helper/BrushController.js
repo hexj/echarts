@@ -22,7 +22,7 @@ define(function (require) {
     var COVER_Z = 10000;
     var UNSELECT_THRESHOLD = 6;
     var MIN_RESIZE_LINE_WIDTH = 6;
-    var MUTEX_RESOURCE_KEY = 'globalPan';
+    var MUTEX_RESOURCE_KEY = 'globalCursor';
 
     var DIRECTION_MAP = {
         w: [0, 0],
@@ -139,9 +139,6 @@ define(function (require) {
          */
         this._creatingPanel;
 
-        // FIXME
-        this._forbidGlobalCursor;
-
         /**
          * @private
          * @type {boolean}
@@ -178,7 +175,6 @@ define(function (require) {
          * @param {number} [brushOption.brushMode='single'] 'single' or 'multiple'
          * @param {boolean} [brushOption.transformable=true]
          * @param {boolean} [brushOption.removeOnClick=false]
-         * @param {boolean} [brushOption.onRelease]
          * @param {Object} [brushOption.brushStyle]
          * @param {number} [brushOption.brushStyle.width]
          * @param {number} [brushOption.brushStyle.lineWidth]
@@ -210,23 +206,11 @@ define(function (require) {
                 var panel = oldPanels[panelId];
                 if (!panel) {
                     panel = new graphic.Rect({
-                        // FIXME
-                        // 这样靠谱么？
                         silent: true,
-                        invisible: true,
-                        style: {
-                            // fill: 'rgba(0,0,0,0)'
-                        },
-                        cursor: 'crosshair'
+                        invisible: true
                     });
-                    // FIXME
-                    // cursor
-                    // boundingRect will change when dragging, so we have
-                    // to keep initial boundingRect.
                     thisGroup.add(panel);
                 }
-                // FIXME
-                // only support rect panel now.
                 panel.attr('shape', panelOpt.rect);
                 panel.__brushPanelId = panelId;
                 newPanels[panelId] = panel;
@@ -261,9 +245,6 @@ define(function (require) {
                 rotation: opt.rotation || 0,
                 scale: opt.scale || [1, 1]
             });
-
-            // FIXME
-            this._forbidGlobalCursor = opt.forbidGlobalCursor;
 
             return this;
         },
@@ -355,16 +336,8 @@ define(function (require) {
     function doEnableBrush(controller, brushOption) {
         var zr = controller._zr;
 
-        var onRelease = zrUtil.bind(function (userOnRelease) {
-            controller.enableBrush(false);
-            userOnRelease && userOnRelease();
-        }, controller, brushOption.onRelease);
-
-        if (!controller._forbidGlobalCursor) {
-            // Consider roam, which takes globalPan too.
-            interactionMutex.take(zr, MUTEX_RESOURCE_KEY, controller._uid, onRelease);
-            zr.setDefaultCursorStyle('crosshair');
-        }
+        // Consider roam, which takes globalCursor too.
+        interactionMutex.take(zr, MUTEX_RESOURCE_KEY, controller._uid);
 
         each(controller._handlers, function (handler, eventName) {
             zr.on(eventName, handler);
@@ -377,10 +350,7 @@ define(function (require) {
     function doDisableBrush(controller) {
         var zr = controller._zr;
 
-        if (!controller._forbidGlobalCursor) {
-            interactionMutex.release(zr, MUTEX_RESOURCE_KEY, controller._uid);
-            zr.setDefaultCursorStyle('default');
-        }
+        interactionMutex.release(zr, MUTEX_RESOURCE_KEY, controller._uid);
 
         each(controller._handlers, function (handler, eventName) {
             zr.off(eventName, handler);
@@ -704,6 +674,24 @@ define(function (require) {
         };
     }
 
+    function resetCursor(controller, e) {
+        var x = e.offsetX;
+        var y = e.offsetY;
+        var zr = controller._zr;
+
+        if (controller._brushType) { // If active
+            var panels = controller._panels;
+            if (panels) { // Brush on panels
+                each(panels, function (panel) {
+                    panel.contain(x, y) && zr.setCursorStyle('crosshair');
+                });
+            }
+            else { // Global brush
+                zr.setCursorStyle('crosshair');
+            }
+        }
+    }
+
     function preventDefault(e) {
         var rawE = e.event;
         rawE.preventDefault && rawE.preventDefault();
@@ -718,7 +706,7 @@ define(function (require) {
 
         controller._track.push(controller.group.transformCoordToLocal(x, y));
 
-        if (shouldShowCover(controller)) {
+        if (shouldShowCover(controller) || creatingCover) {
 
             if (panel && !creatingCover) {
                 thisBrushOption.brushMode === 'single' && clearCovers(controller);
@@ -748,7 +736,6 @@ define(function (require) {
         }
         else if (
             isEnd
-            && !creatingCover
             && thisBrushOption.brushMode === 'single'
             && thisBrushOption.removeOnClick
         ) {
@@ -764,7 +751,12 @@ define(function (require) {
     var mouseHandlers = {
 
         mousedown: function (e) {
-            if (!e.target || !e.target.draggable) {
+            if (this._dragging) {
+                // In case some browser do not support globalOut,
+                // and release mose out side the browser.
+                handleDragEnd.call(this, e);
+            }
+            else if (!e.target || !e.target.draggable) {
 
                 preventDefault(e);
 
@@ -782,6 +774,9 @@ define(function (require) {
         },
 
         mousemove: function (e) {
+            // set Cursor
+            resetCursor(this, e);
+
             if (this._dragging) {
 
                 preventDefault(e);
@@ -790,18 +785,24 @@ define(function (require) {
             }
         },
 
-        mouseup: function (e) {
-            if (this._dragging) {
+        mouseup: handleDragEnd //,
 
-                preventDefault(e);
-
-                updateCoverByMouse(this, e, true);
-
-                this._dragging = false;
-                this._track = [];
-            }
-        }
+        // FIXME
+        // in tooltip, globalout should not be triggered.
+        // globalout: handleDragEnd
     };
+
+    function handleDragEnd(e) {
+        if (this._dragging) {
+
+            preventDefault(e);
+
+            updateCoverByMouse(this, e, true);
+
+            this._dragging = false;
+            this._track = [];
+        }
+    }
 
     /**
      * key: brushType
